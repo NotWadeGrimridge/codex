@@ -1,3 +1,5 @@
+cargo-features = ["codegen-backend"]
+
 [workspace]
 members = [
     "backend-client",
@@ -267,7 +269,7 @@ ignored = [
 ]
 
 [profile.release]
-lto = "fat"
+codegen-backend = "cranelift"
 # Because we bundle some of these executables with the TypeScript CLI, we
 # remove everything to make the binary as small as possible.
 strip = "symbols"
