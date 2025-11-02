@@ -269,7 +269,7 @@ impl ModelClient {
             parallel_tool_calls: prompt.parallel_tool_calls,
             reasoning,
             store: azure_workaround,
-            stream: true,
+            stream: !self.config.disable_streaming,
             include,
             prompt_cache_key: Some(self.conversation_id.to_string()),
             text,
@@ -315,10 +315,11 @@ impl ModelClient {
         // Always fetch the latest auth in case a prior attempt refreshed the token.
         let auth = auth_manager.as_ref().and_then(|m| m.auth());
 
+        let payload_body = serde_json::to_string(payload_json).unwrap_or_default();
         trace!(
             "POST to {}: {}",
             self.provider.get_full_url(&auth),
-            payload_json.to_string()
+            payload_body
         );
 
         let mut req_builder = self
@@ -340,11 +341,25 @@ impl ModelClient {
             req_builder = req_builder.header("x-openai-subagent", subagent);
         }
 
+        // Include session source for backend telemetry and routing.
+        let task_type = match serde_json::to_value(&self.session_source) {
+            Ok(serde_json::Value::String(s)) => s,
+            Ok(other) => other.to_string(),
+            Err(_) => "unknown".to_string(),
+        };
+        let accept = if self.config.disable_streaming {
+            "application/json"
+        } else {
+            "text/event-stream"
+        };
+
+        req_builder = req_builder.header("Codex-Task-Type", task_type);
+
         req_builder = req_builder
             // Send session_id for compatibility.
             .header("conversation_id", self.conversation_id.to_string())
             .header("session_id", self.conversation_id.to_string())
-            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .header(reqwest::header::ACCEPT, accept)
             .json(payload_json);
 
         if let Some(auth) = auth.as_ref()
@@ -380,19 +395,24 @@ impl ModelClient {
                     debug!("receiver dropped rate limit snapshot event");
                 }
 
-                // spawn task to process SSE
-                let stream = resp.bytes_stream().map_err(move |e| {
-                    CodexErr::ResponseStreamFailed(ResponseStreamFailed {
-                        source: e,
-                        request_id: request_id.clone(),
-                    })
-                });
-                tokio::spawn(process_sse(
-                    stream,
-                    tx_event,
-                    self.provider.stream_idle_timeout(),
-                    self.otel_event_manager.clone(),
-                ));
+                if self.config.disable_streaming {
+                    tokio::spawn(handle_non_streamed_response(resp, tx_event));
+                } else {
+                    // spawn task to process SSE
+                    let request_id_for_stream = request_id.clone();
+                    let stream = resp.bytes_stream().map_err(move |e| {
+                        CodexErr::ResponseStreamFailed(ResponseStreamFailed {
+                            source: e,
+                            request_id: request_id_for_stream.clone(),
+                        })
+                    });
+                    tokio::spawn(process_sse(
+                        stream,
+                        tx_event,
+                        self.provider.stream_idle_timeout(),
+                        self.otel_event_manager.clone(),
+                    ));
+                }
 
                 Ok(ResponseStream { rx_event })
             }
@@ -676,6 +696,13 @@ impl From<ResponseCompletedUsage> for TokenUsage {
 }
 
 #[derive(Debug, Deserialize)]
+struct NonStreamedResponse {
+    id: String,
+    usage: Option<ResponseCompletedUsage>,
+    output: Vec<ResponseItem>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ResponseCompletedInputTokensDetails {
     cached_tokens: i64,
 }
@@ -798,6 +825,50 @@ fn parse_header_bool(headers: &HeaderMap, name: &str) -> Option<bool> {
 
 fn parse_header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
+}
+
+async fn send_non_streamed_events(
+    response: NonStreamedResponse,
+    tx_event: mpsc::Sender<Result<ResponseEvent>>,
+) {
+    // Send Created
+    if tx_event.send(Ok(ResponseEvent::Created {})).await.is_err() {
+        return;
+    }
+    // Forward each output item
+    for item in response.output {
+        if tx_event
+            .send(Ok(ResponseEvent::OutputItemDone(item)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    // Send Completed
+    let _ = tx_event
+        .send(Ok(ResponseEvent::Completed {
+            response_id: response.id,
+            token_usage: response.usage.map(Into::into),
+        }))
+        .await;
+}
+
+async fn handle_non_streamed_response(
+    resp: reqwest::Response,
+    tx_event: mpsc::Sender<Result<ResponseEvent>>,
+) {
+    match resp.json::<NonStreamedResponse>().await {
+        Ok(response) => send_non_streamed_events(response, tx_event).await,
+        Err(e) => {
+            let _ = tx_event
+                .send(Err(CodexErr::Stream(
+                    format!("failed to parse non-streamed response: {e}"),
+                    None,
+                )))
+                .await;
+        }
+    };
 }
 
 async fn process_sse<S>(

@@ -122,6 +122,9 @@ pub struct Config {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: bool,
 
+    /// When `true`, streaming responses are disabled.
+    pub disable_streaming: bool,
+
     /// User-provided instructions from AGENTS.md.
     pub user_instructions: Option<String>,
 
@@ -588,6 +591,9 @@ pub struct ConfigToml {
     /// Sandbox configuration to apply if `sandbox` is `WorkspaceWrite`.
     pub sandbox_workspace_write: Option<SandboxWorkspaceWrite>,
 
+    /// When `true`, streaming responses are disabled.
+    pub disable_streaming: Option<bool>,
+
     /// Optional external command to spawn for end-user notifications.
     #[serde(default)]
     pub notify: Option<Vec<String>>,
@@ -896,6 +902,7 @@ pub struct ConfigOverrides {
     pub developer_instructions: Option<String>,
     pub compact_prompt: Option<String>,
     pub include_apply_patch_tool: Option<bool>,
+    pub disable_streaming: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
     pub tools_web_search_request: Option<bool>,
     pub experimental_sandbox_command_assessment: Option<bool>,
@@ -955,6 +962,7 @@ impl Config {
             developer_instructions,
             compact_prompt,
             include_apply_patch_tool: include_apply_patch_tool_override,
+            disable_streaming,
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
             experimental_sandbox_command_assessment: sandbox_command_assessment_override,
@@ -1188,6 +1196,7 @@ impl Config {
             did_user_set_custom_approval_policy_or_sandbox_mode,
             forced_auto_mode_downgraded_on_windows,
             shell_environment_policy,
+            disable_streaming: disable_streaming.or(cfg.disable_streaming).unwrap_or(false),
             notify: cfg.notify,
             user_instructions,
             base_instructions,
@@ -2970,6 +2979,7 @@ model_verbosity = "high"
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
                 forced_auto_mode_downgraded_on_windows: false,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
+                disable_streaming: false,
                 user_instructions: None,
                 notify: None,
                 cwd: fixture.cwd(),
@@ -3043,6 +3053,7 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
+            disable_streaming: false,
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -3131,6 +3142,7 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
+            disable_streaming: false,
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -3192,6 +3204,7 @@ model_verbosity = "high"
             fixture.codex_home(),
         )?;
         let expected_gpt5_profile_config = Config {
+            disable_streaming: false,
             model: "gpt-5.1".to_string(),
             review_model: OPENAI_DEFAULT_REVIEW_MODEL.to_string(),
             model_family: find_family_for_model("gpt-5.1").expect("known model slug"),
