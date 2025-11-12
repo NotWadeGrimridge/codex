@@ -3033,3 +3033,47 @@ fn chatwidget_tall() {
     .unwrap();
     assert_snapshot!(term.backend().vt100().screen().contents());
 }
+
+#[test]
+fn extract_at_mentions_cases() {
+    let cases: &[(&str, &[&str])] = &[
+        ("Check @test.txt please", &["test.txt"]),
+        (
+            "Look at @src/main.rs and @Cargo.toml",
+            &["src/main.rs", "Cargo.toml"],
+        ),
+        ("No mentions here", &[]),
+        (
+            "@file1.txt @file2.txt multiple files",
+            &["file1.txt", "file2.txt"],
+        ),
+        ("@./relative/path.txt works", &["./relative/path.txt"]),
+        ("@/absolute/path.txt also works", &["/absolute/path.txt"]),
+        ("Just @username not a file", &[]),
+        (
+            "Edge case @file.txt@another.txt",
+            &["file.txt", "another.txt"],
+        ),
+        ("Check @main.rs.", &["main.rs"]),
+        ("Mention @src/lib.rs:42 for context", &["src/lib.rs"]),
+        ("", &[]),
+        ("   ", &[]),
+        ("@", &[]),
+        ("@ ", &[]),
+        ("@file.txt", &["file.txt"]),
+        ("@path/to/file.rs", &["path/to/file.rs"]),
+        ("@./relative/path", &["./relative/path"]),
+        ("@../parent/file", &["../parent/file"]),
+        ("@/absolute/path", &["/absolute/path"]),
+        ("@C:\\Windows\\file.txt", &["C:\\Windows\\file.txt"]),
+    ];
+
+    for (input, expected) in cases {
+        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            ChatWidget::extract_at_mentions(input),
+            expected,
+            "Failed for input: '{input}'"
+        );
+    }
+}

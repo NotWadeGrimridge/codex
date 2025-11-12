@@ -848,12 +848,13 @@ impl ChatComposer {
         let mut new_text =
             String::with_capacity(text.len() - (end_idx - start_idx) + inserted.len() + 1);
         new_text.push_str(&text[..start_idx]);
+        new_text.push('@');
         new_text.push_str(&inserted);
         new_text.push(' ');
         new_text.push_str(&text[end_idx..]);
 
         self.textarea.set_text(&new_text);
-        let new_cursor = start_idx.saturating_add(inserted.len()).saturating_add(1);
+        let new_cursor = start_idx.saturating_add(inserted.len()).saturating_add(2);
         self.textarea.set_cursor(new_cursor);
     }
 

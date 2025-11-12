@@ -1548,6 +1548,158 @@ impl ChatWidget {
         }
     }
 
+    /// Extract all @-mentions from the given text.
+    /// Returns a vector of file paths (without the @ prefix).
+    fn extract_at_mentions(text: &str) -> Vec<String> {
+        let mut mentions = Vec::new();
+        let mut idx = 0usize;
+        while idx < text.len() {
+            let Some(rel_idx) = text[idx..].find('@') else {
+                break;
+            };
+            let token_start = idx + rel_idx + 1;
+            if token_start >= text.len() {
+                break;
+            }
+            let remainder = &text[token_start..];
+            let end_rel = remainder
+                .char_indices()
+                .find(|(_, c)| c.is_whitespace() || *c == '@')
+                .map(|(pos, _)| pos)
+                .unwrap_or(remainder.len());
+            if end_rel == 0 {
+                idx = token_start;
+                continue;
+            }
+            if let Some(token) = Self::normalize_at_mention(&remainder[..end_rel]) {
+                mentions.push(token.to_string());
+            }
+            idx = token_start + end_rel;
+        }
+        mentions
+    }
+
+    fn normalize_at_mention(token: &str) -> Option<&str> {
+        let trimmed = token.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let trimmed =
+            trimmed.trim_end_matches(|c: char| matches!(c, ',' | '.' | ';' | ')' | ']' | '}'));
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let candidate = if let Some((prefix, suffix)) = trimmed.rsplit_once(':') {
+            if suffix.chars().all(|c| c.is_ascii_digit()) && !prefix.is_empty() {
+                prefix
+            } else {
+                trimmed
+            }
+        } else {
+            trimmed
+        };
+
+        if candidate.is_empty() {
+            return None;
+        }
+
+        if candidate.contains('/') || candidate.contains('.') {
+            return Some(candidate);
+        }
+
+        None
+    }
+
+    /// Read a file and format its contents like ReadFileHandler does.
+    fn read_and_format_file_sync(&self, path_str: &str) -> Result<(String, String), String> {
+        use std::fs::File;
+        use std::io::BufRead;
+        use std::io::BufReader;
+        use std::path::PathBuf;
+
+        const MAX_LINE_LENGTH: usize = 500;
+        const DEFAULT_LIMIT: usize = 2000;
+
+        // Resolve relative path to absolute
+        let path = if std::path::Path::new(path_str).is_absolute() {
+            PathBuf::from(path_str)
+        } else {
+            self.config.cwd.join(path_str)
+        };
+
+        // Check if file exists and is readable
+        if !path.exists() {
+            return Err(format!("File not found: {}", path.display()));
+        }
+
+        if !path.is_file() {
+            return Err(format!("Not a file: {}", path.display()));
+        }
+
+        // Read file
+        let file = File::open(&path)
+            .map_err(|e| format!("Failed to open file {}: {}", path.display(), e))?;
+
+        let mut reader = BufReader::new(file);
+        let mut collected = Vec::new();
+        let mut seen = 0usize;
+        let mut buffer = Vec::new();
+
+        loop {
+            buffer.clear();
+            let bytes_read = reader
+                .read_until(b'\n', &mut buffer)
+                .map_err(|e| format!("Failed to read file {}: {}", path.display(), e))?;
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            if buffer.last() == Some(&b'\n') {
+                buffer.pop();
+                if buffer.last() == Some(&b'\r') {
+                    buffer.pop();
+                }
+            }
+
+            seen += 1;
+
+            if collected.len() == DEFAULT_LIMIT {
+                break;
+            }
+
+            // Format line like ReadFileHandler does
+            let decoded = String::from_utf8_lossy(&buffer);
+            let formatted = if decoded.len() > MAX_LINE_LENGTH {
+                Self::truncate_to_char_boundary(&decoded, MAX_LINE_LENGTH).to_string()
+            } else {
+                decoded.into_owned()
+            };
+
+            collected.push(format!("L{seen}: {formatted}"));
+
+            if collected.len() == DEFAULT_LIMIT {
+                break;
+            }
+        }
+
+        let display_path = path.display().to_string();
+        Ok((display_path, collected.join("\n")))
+    }
+
+    fn truncate_to_char_boundary(text: &str, max_bytes: usize) -> &str {
+        if text.len() <= max_bytes {
+            return text;
+        }
+        let mut end = max_bytes;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+
     fn submit_user_message(&mut self, user_message: UserMessage) {
         let UserMessage { text, image_paths } = user_message;
         if text.is_empty() && image_paths.is_empty() {
@@ -1574,8 +1726,30 @@ impl ChatWidget {
             return;
         }
 
+        // Add the original message text as the first item
         if !text.is_empty() {
             items.push(UserInput::Text { text: text.clone() });
+        }
+
+        // Extract and process @-mentions
+        if !text.is_empty() {
+            let mentions = Self::extract_at_mentions(&text);
+            for mention in mentions {
+                match self.read_and_format_file_sync(&mention) {
+                    Ok((display_path, file_content)) => {
+                        // Add file content as a separate UserInput::Text item
+                        items.push(UserInput::Text {
+                            text: format!("\n\nFile: {display_path}\n{file_content}"),
+                        });
+                    }
+                    Err(error_msg) => {
+                        // Add error message as a UserInput::Text item
+                        items.push(UserInput::Text {
+                            text: format!("\n\nError reading @{mention}: {error_msg}"),
+                        });
+                    }
+                }
+            }
         }
 
         for path in image_paths {
